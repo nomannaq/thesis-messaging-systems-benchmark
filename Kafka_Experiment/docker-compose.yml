@@ -13,7 +13,9 @@ services:
     depends_on:
       - zookeeper
     ports:
-      - 29092:29092
+      - 29092:29092 #Exposed to the host
+    expose:
+      - '9092'    
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -22,3 +24,30 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+  init-kafka:
+    image: confluentinc/cp-kafka:5.3.1
+    depends_on:
+      - kafka
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # Wait for Kafka to be reachable
+      echo 'Waiting for Kafka to be ready...'
+      while ! kafka-topics --bootstrap-server kafka:9092 --list; do
+        echo 'Kafka not ready yet. Retrying in 5 seconds...'
+        sleep 40
+      done
+
+      # Create Kafka topics
+      echo 'Creating Kafka topics...'
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic test_topic --replication-factor 1 --partitions 2
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic test-topic --replication-factor 1 --partitions 2
+
+      # Create a consumer group
+      echo 'Creating a consumer group...'
+      kafka-consumer-groups --bootstrap-server kafka:9092 --create --group test-group --topic test_topic --reset-offsets --to-earliest
+
+      # List all topics to confirm creation
+      echo 'Successfully created the following topics:'
+      kafka-topics --bootstrap-server kafka:9092 --list
+      "
