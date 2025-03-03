@@ -1,18 +1,21 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
-	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
+	"golang.org/x/time/rate"
 )
 
 func main() {
-	var messageSize, messageRate, totalMessages int
+	var messageSize, totalMessages int64
+	var messageRate int
 
-	// Get user input
 	fmt.Print("Enter message size (bytes): ")
 	fmt.Scan(&messageSize)
 	fmt.Print("Enter message rate (messages/sec): ")
@@ -20,56 +23,88 @@ func main() {
 	fmt.Print("Enter total messages to send: ")
 	fmt.Scan(&totalMessages)
 
-	kafkaBroker := "localhost:29092" // Match the broker address from your Kafka setup
+	kafkaBroker := "localhost:29092"
 	topic := "test_topic"
 
-	// Configure Kafka producer
 	producer, err := kafka.NewProducer(&kafka.ConfigMap{
 		"bootstrap.servers": kafkaBroker,
+		"linger.ms":         10,    // Small batching
+		"batch.size":        16384, // 16KB batch size
+		"compression.type":  "lz4",
+		"acks":              "all", // Ensure reliability
 	})
 	if err != nil {
-		log.Fatalf("Failed to create producer: %s\n", err)
+		log.Fatal(err)
 	}
 	defer producer.Close()
 
-	// Generate payload of specified size
 	payload := make([]byte, messageSize)
 	for i := range payload {
-		payload[i] = 'A' // Filling the payload with 'A'
+		payload[i] = 'A'
 	}
 
-	// Start sending messages
-	startTime := time.Now()
+	var (
+		wg           sync.WaitGroup
+		deliveryChan = make(chan kafka.Event, 10000)
+		successCount atomic.Int64
+		failureCount atomic.Int64
+		limiter      = rate.NewLimiter(rate.Limit(messageRate), messageRate) // Use int for rate
+		workers      = 16
+		messagesLeft = totalMessages
+		start        = time.Now()
+	)
 
-	for i := 1; i <= totalMessages; i++ {
-		// Send message asynchronously
-		err := producer.Produce(&kafka.Message{
-			TopicPartition: kafka.TopicPartition{
-				Topic:     &topic,
-				Partition: kafka.PartitionAny,
-			},
-			Key:   []byte(strconv.Itoa(i)),
-			Value: payload,
-		}, nil)
-
-		if err != nil {
-			log.Fatalf("Failed to produce message: %s\n", err)
+	// Start delivery report handler
+	go func() {
+		for e := range producer.Events() {
+			switch ev := e.(type) {
+			case *kafka.Message:
+				if ev.TopicPartition.Error != nil {
+					failureCount.Add(1)
+				} else {
+					successCount.Add(1)
+				}
+			}
 		}
+	}()
 
-		// Log every sent message
-		fmt.Printf("Sent message %d\n", i)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for atomic.LoadInt64(&messagesLeft) > 0 {
+				if err := limiter.WaitN(context.Background(), 1); err != nil {
+					log.Printf("Rate limiter error: %v", err)
+					continue
+				}
 
-		// Rate control
-		if i%messageRate == 0 {
-			time.Sleep(time.Second) // Sleep to control the rate (messages/sec)
-		}
+				if atomic.AddInt64(&messagesLeft, -1) < 0 {
+					return
+				}
+
+				err := producer.Produce(&kafka.Message{
+					TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
+					Value:          payload,
+					Timestamp:      time.Now().UTC(), // Use UTC for consistency
+				}, deliveryChan)
+
+				if err != nil {
+					failureCount.Add(1)
+				}
+			}
+		}()
 	}
 
-	const flushTimeout = 10 * 1000 // 10 seconds in milliseconds
-	producer.Flush(flushTimeout)   // Flush messages to Kafka
-	// Calculate throughput
-	elapsed := time.Since(startTime)
-	throughput := float64(totalMessages) / elapsed.Seconds()
-	fmt.Printf("Throughput: %.2f msg/s\n", throughput)
-	fmt.Println("Message sending complete. Exiting...")
+	wg.Wait()
+	producer.Flush(30 * 1000)
+	close(deliveryChan)
+	elapsed := time.Since(start)
+
+	fmt.Printf("\n=== Producer Metrics ===\n")
+	fmt.Printf("Attempted: %d\n", totalMessages)
+	fmt.Printf("Successful: %d\n", successCount.Load())
+	fmt.Printf("Failed: %d\n", failureCount.Load())
+	fmt.Printf("Throughput: %.2f msg/s\n", float64(successCount.Load())/elapsed.Seconds())
+	fmt.Printf("Throughput: %.2f MB/s\n",
+		(float64(successCount.Load()*messageSize) / 1024 / 1024 / elapsed.Seconds()))
 }
