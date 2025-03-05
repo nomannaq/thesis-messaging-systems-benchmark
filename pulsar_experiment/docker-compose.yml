@@ -1,0 +1,9 @@
+version: "3"
+services:
+  pulsar:
+    image: apachepulsar/pulsar:latest
+    container_name: pulsar1
+    ports:
+      - "6650:6650"   # Pulsar broker port for messaging
+      - "8080:8080"   # Pulsar REST API and web interface
+    command: ["/pulsar/bin/pulsar", "standalone"]
