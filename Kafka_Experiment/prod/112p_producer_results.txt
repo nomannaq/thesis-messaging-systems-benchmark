@@ -1,0 +1,5 @@
+Test: 112p
+Message Size: 1024 bytes
+Message Rate: 0 msg/s
+Total Messages: 30000
+Throughput: 2977.61 msg/s

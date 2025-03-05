@@ -1,0 +1,6 @@
+Test: 12
+Total Messages: 0
+Mean Latency: NaN ms
+Min Latency: 0.00 ms
+Max Latency: 0.00 ms
+Total Elapsed Time: 0.00 seconds
