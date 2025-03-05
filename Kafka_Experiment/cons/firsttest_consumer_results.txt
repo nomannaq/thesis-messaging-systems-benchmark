@@ -1,5 +1,0 @@
-Test: firsttest
-Total Messages: 0
-Mean Latency: NaN ms
-Min Latency: 0.00 ms
-Max Latency: 0.00 ms

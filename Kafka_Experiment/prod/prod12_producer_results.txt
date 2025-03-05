@@ -1,5 +1,0 @@
-Test: prod12
-Message Size: 1024 bytes
-Message Rate: 0 msg/s
-Total Messages: 30000
-Throughput: 2980.89 msg/s

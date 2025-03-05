@@ -1,5 +1,0 @@
-5
-bookieHost: "bookkeeper:3181"
-journalDir: "data/bookkeeper/journal"
-ledgerDirs: "1\tdata/bookkeeper/ledgers"
-instanceId: "c6afd3ea-e2ec-4fb6-acee-c0406d90c4a3"

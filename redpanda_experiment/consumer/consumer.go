@@ -3,92 +3,124 @@ package main
 import (
 	"fmt"
 	"log"
-	"strconv"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/kafka"
 )
 
-func main() {
-	// Kafka (Redpanda) configuration
-	broker := "localhost:9092"
-	topic := "test_topic"
-	groupID := "test_group"
+type Result struct {
+	latency time.Duration
+	size    int // Size of the message in bytes
+}
 
-	// Create a new consumer
+func main() {
+	var batchSize int
+	fmt.Print("Enter batch size: ")
+	fmt.Scan(&batchSize)
+
 	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers": broker,
-		"group.id":          groupID,
+		"bootstrap.servers": "localhost:9092", // Change this to your Redpanda broker address
+		"group.id":          "perf-test-group",
 		"auto.offset.reset": "earliest",
+		"fetch.min.bytes":   1048576, // 1MB
+		"fetch.max.bytes":   5242880, // 5MB
+		//"max.poll.records":  10000,   // Process 10k messages per poll
 	})
 	if err != nil {
-		log.Fatalf("Failed to create consumer: %s", err)
+		log.Fatal(err)
 	}
 	defer consumer.Close()
 
-	// Subscribe to the topic
-	err = consumer.SubscribeTopics([]string{topic}, nil)
-	if err != nil {
-		log.Fatalf("Failed to subscribe to topic: %s", err)
+	consumer.SubscribeTopics([]string{"test_topic"}, nil)
+
+	resultChan := make(chan Result, 10000)
+	var wg sync.WaitGroup
+	workers := 16 // Increase based on CPU cores
+
+	// Start workers
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for res := range resultChan {
+				// Simulate processing time
+				_ = res // Process result here
+			}
+		}()
 	}
 
-	var latencies []float64
-	var minLatency, maxLatency float64
+	var (
+		totalMsg     int
+		totalLatency time.Duration
+		totalBytes   int64 // Track total bytes processed
+		minLatency   = time.Hour
+		maxLatency   time.Duration
+		startTime    time.Time // Start time for processing
+	)
 
-	fmt.Println("Consumer started. Waiting for messages...")
+	sigchan := make(chan os.Signal, 1)
+	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Consume messages
+	fmt.Printf("Consumer started (workers=%d)\n", workers)
+
+BatchLoop:
 	for {
-		msg, err := consumer.ReadMessage(-1)
-		if err != nil {
-			log.Fatalf("Failed to read message: %s", err)
-		}
-
-		// Extract timestamp from headers
-		var sendTime int64
-		for _, header := range msg.Headers {
-			if header.Key == "timestamp" {
-				sendTime, _ = strconv.ParseInt(string(header.Value), 10, 64)
-				break
+		select {
+		case sig := <-sigchan:
+			fmt.Printf("Terminating: %v\n", sig)
+			break BatchLoop
+		default:
+			msg, err := consumer.ReadMessage(100 * time.Millisecond)
+			if err != nil {
+				if err.(kafka.Error).Code() == kafka.ErrTimedOut {
+					continue
+				}
+				log.Printf("Error: %v", err)
+				continue
 			}
-		}
-		receiveTime := time.Now().UnixNano()
-		latency := float64(receiveTime-sendTime) / 1e6 // Convert ns to ms
 
-		// Append latency to the array
-		latencies = append(latencies, latency)
+			// Start the timer when the first message is received
+			if totalMsg == 0 {
+				startTime = time.Now()
+			}
 
-		// Update min and max latency
-		if len(latencies) == 1 {
-			minLatency, maxLatency = latency, latency
-		} else {
+			latency := time.Since(msg.Timestamp)
+			resultChan <- Result{latency: latency, size: len(msg.Value)}
+
+			totalMsg++
+			totalLatency += latency
+			totalBytes += int64(len(msg.Value)) // Accumulate total bytes
 			if latency < minLatency {
 				minLatency = latency
 			}
 			if latency > maxLatency {
 				maxLatency = latency
 			}
-		}
 
-		// Print the message body
-		fmt.Printf("Received message: %s\n", string(msg.Value))
-
-		// Log every 1000 messages
-		if len(latencies)%1000 == 0 {
-			meanLatency := mean(latencies)
-			fmt.Printf(
-				"Processed %d messages. Mean latency: %.2f ms, Min latency: %.2f ms, Max latency: %.2f ms\n",
-				len(latencies), meanLatency, minLatency, maxLatency,
-			)
+			if totalMsg >= batchSize {
+				break BatchLoop
+			}
 		}
 	}
-}
 
-// Helper function to calculate mean latency
-func mean(arr []float64) float64 {
-	sum := 0.0
-	for _, v := range arr {
-		sum += v
-	}
-	return sum / float64(len(arr))
+	close(resultChan)
+	wg.Wait()
+	elapsed := time.Since(startTime)
+	fmt.Printf("\n=== Consumer Metrics ===\n")
+	fmt.Printf("Messages received: %d\n", totalMsg)
+	fmt.Printf("Time elapsed: %.2f seconds\n", elapsed.Seconds())
+	fmt.Printf("Throughput: %.2f messages/second\n", float64(totalMsg)/elapsed.Seconds())
+	fmt.Printf("Throughput: %.2f MB/second\n", float64(totalBytes)/1024/1024/elapsed.Seconds())
+
+	// Calculate average latency
+	avgLatency := time.Duration(int64(totalLatency) / int64(totalMsg))
+
+	fmt.Printf("Latency (min/mean/max): %v / %v / %v\n",
+		minLatency.Round(time.Microsecond),
+		avgLatency.Round(time.Microsecond),
+		maxLatency.Round(time.Microsecond))
 }
