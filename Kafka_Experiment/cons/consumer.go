@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -18,17 +19,26 @@ type Result struct {
 }
 
 func main() {
-	var batchSize int
-	fmt.Print("Enter batch size: ")
-	fmt.Scan(&batchSize)
+	var runDuration time.Duration
+
+	fmt.Print("Enter run duration (e.g., 5m for 5 minutes): ")
+	var durationInput string
+	fmt.Scan(&durationInput)
+
+	// Parse the duration input (e.g., "5m" for 5 minutes)
+	runDuration, err := time.ParseDuration(durationInput)
+	if err != nil {
+		log.Fatalf("Invalid duration format: %v", err)
+	}
 
 	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers": "localhost:29092",
-		"group.id":          "perf-test-group",
-		"auto.offset.reset": "earliest",
-		"fetch.min.bytes":   1048576, // 1MB
-		"fetch.max.bytes":   5242880, // 5MB
-		//"max.poll.records":  10000,   // Process 10k messages per poll
+		"bootstrap.servers":     "localhost:29092",
+		"group.id":              "perf-test-group",
+		"auto.offset.reset":     "latest", // Change to "latest" to avoid old messages
+		"fetch.min.bytes":       1,        // Fetch messages as soon as they arrive
+		"fetch.max.bytes":       5242880,  // 5MB
+		"session.timeout.ms":    6000,     // Prevent frequent rebalancing
+		"heartbeat.interval.ms": 2000,     // Keep heartbeats frequent
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -38,8 +48,8 @@ func main() {
 	consumer.SubscribeTopics([]string{"test_topic"}, nil)
 
 	resultChan := make(chan Result, 10000)
+	workers := runtime.NumCPU() * 2 // Dynamically set based on CPU cores
 	var wg sync.WaitGroup
-	workers := 16 // Increase based on CPU cores
 
 	// Start workers
 	for i := 0; i < workers; i++ {
@@ -47,8 +57,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for res := range resultChan {
-				// Simulate processing time
-				_ = res // Process result here
+				_ = res // Simulate processing
 			}
 		}()
 	}
@@ -56,10 +65,11 @@ func main() {
 	var (
 		totalMsg     int
 		totalLatency time.Duration
-		totalBytes   int64 // Track total bytes processed
+		totalBytes   int64
 		minLatency   = time.Hour
 		maxLatency   time.Duration
-		startTime    time.Time // Start time for processing
+		startTime    time.Time
+		endTime      time.Time
 	)
 
 	sigchan := make(chan os.Signal, 1)
@@ -67,25 +77,28 @@ func main() {
 
 	fmt.Printf("Consumer started (workers=%d)\n", workers)
 
-BatchLoop:
+	startTime = time.Now()
+	endTime = startTime.Add(runDuration) // Calculate end time
+
+ConsumerLoop:
 	for {
 		select {
 		case sig := <-sigchan:
 			fmt.Printf("Terminating: %v\n", sig)
-			break BatchLoop
+			break ConsumerLoop
 		default:
-			msg, err := consumer.ReadMessage(100 * time.Millisecond)
+			if time.Now().After(endTime) {
+				fmt.Println("Run duration reached. Stopping consumer.")
+				break ConsumerLoop
+			}
+
+			msg, err := consumer.ReadMessage(time.Second) // Increase timeout to 1s
 			if err != nil {
 				if err.(kafka.Error).Code() == kafka.ErrTimedOut {
-					continue
+					continue // Avoid unnecessary logs
 				}
 				log.Printf("Error: %v", err)
 				continue
-			}
-
-			// Start the timer when the first message is received
-			if totalMsg == 0 {
-				startTime = time.Now()
 			}
 
 			latency := time.Since(msg.Timestamp)
@@ -93,16 +106,12 @@ BatchLoop:
 
 			totalMsg++
 			totalLatency += latency
-			totalBytes += int64(len(msg.Value)) // Accumulate total bytes
+			totalBytes += int64(len(msg.Value))
 			if latency < minLatency {
 				minLatency = latency
 			}
 			if latency > maxLatency {
 				maxLatency = latency
-			}
-
-			if totalMsg >= batchSize {
-				break BatchLoop
 			}
 		}
 	}
@@ -110,17 +119,19 @@ BatchLoop:
 	close(resultChan)
 	wg.Wait()
 	elapsed := time.Since(startTime)
+
 	fmt.Printf("\n=== Consumer Metrics ===\n")
+	fmt.Printf("Run Duration: %s\n", runDuration)
 	fmt.Printf("Messages received: %d\n", totalMsg)
 	fmt.Printf("Time elapsed: %.2f seconds\n", elapsed.Seconds())
 	fmt.Printf("Throughput: %.2f messages/second\n", float64(totalMsg)/elapsed.Seconds())
 	fmt.Printf("Throughput: %.2f MB/second\n", float64(totalBytes)/1024/1024/elapsed.Seconds())
 
-	// Calculate average latency
 	avgLatency := time.Duration(int64(totalLatency) / int64(totalMsg))
-
 	fmt.Printf("Latency (min/mean/max): %v / %v / %v\n",
 		minLatency.Round(time.Microsecond),
 		avgLatency.Round(time.Microsecond),
 		maxLatency.Round(time.Microsecond))
+
+	os.Exit(0)
 }
