@@ -1,10 +1,13 @@
 package main
 
 import (
+	"encoding/csv"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -17,18 +20,41 @@ type Result struct {
 	size    int // Size of the message in bytes
 }
 
+type MetricSnapshot struct {
+	timestamp     time.Time
+	messagesCount int
+	bytesReceived int64
+	avgLatencyMs  float64
+	minLatencyMs  int64
+	maxLatencyMs  int64
+	msgThroughput float64
+	mbThroughput  float64
+	partition     int
+	offset        int64
+}
+
 func main() {
-	var batchSize int
-	fmt.Print("Enter batch size: ")
-	fmt.Scan(&batchSize)
+	var runDuration time.Duration
+
+	fmt.Print("Enter run duration (e.g., 5m for 5 minutes): ")
+	var durationInput string
+	fmt.Scan(&durationInput)
+
+	// Parse the duration input (e.g., "5m" for 5 minutes)
+	runDuration, err := time.ParseDuration(durationInput)
+	if err != nil {
+		log.Fatalf("Invalid duration format: %v", err)
+	}
 
 	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers": "localhost:9092", // Change this to your Redpanda broker address
-		"group.id":          "perf-test-group",
-		"auto.offset.reset": "earliest",
-		"fetch.min.bytes":   1048576, // 1MB
-		"fetch.max.bytes":   5242880, // 5MB
-		//"max.poll.records":  10000,   // Process 10k messages per poll
+		"bootstrap.servers":      "localhost:9092",
+		"group.id":               "perf-test-group",
+		"auto.offset.reset":      "latest",
+		"fetch.min.bytes":        1,
+		"fetch.max.bytes":        5242880,
+		"session.timeout.ms":     6000,
+		"heartbeat.interval.ms":  2000,
+		"statistics.interval.ms": 1000,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -38,8 +64,9 @@ func main() {
 	consumer.SubscribeTopics([]string{"test_topic"}, nil)
 
 	resultChan := make(chan Result, 10000)
+	metricsChan := make(chan MetricSnapshot, 1000)
+	workers := runtime.NumCPU() * 2 // Dynamically set based on CPU cores
 	var wg sync.WaitGroup
-	workers := 16 // Increase based on CPU cores
 
 	// Start workers
 	for i := 0; i < workers; i++ {
@@ -47,34 +74,92 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for res := range resultChan {
-				// Simulate processing time
-				_ = res // Process result here
+				_ = res // Simulate processing
 			}
 		}()
 	}
 
+	// Start metrics collector
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		collectAndSaveMetrics(metricsChan)
+	}()
+
 	var (
-		totalMsg     int
-		totalLatency time.Duration
-		totalBytes   int64 // Track total bytes processed
-		minLatency   = time.Hour
-		maxLatency   time.Duration
-		startTime    time.Time // Start time for processing
+		totalMsg      int
+		totalLatency  time.Duration
+		totalBytes    int64
+		minLatency    = time.Hour
+		maxLatency    time.Duration
+		startTime     time.Time
+		endTime       time.Time
+		lastPartition int
+		lastOffset    int64
 	)
 
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
 
+	// Create metrics ticker
+	metricsTicker := time.NewTicker(1 * time.Second)
+	defer metricsTicker.Stop()
+
 	fmt.Printf("Consumer started (workers=%d)\n", workers)
 
-BatchLoop:
+	startTime = time.Now()
+	endTime = startTime.Add(runDuration) // Calculate end time
+
+	// Start periodic metrics collection
+	go func() {
+		for {
+			select {
+			case <-metricsTicker.C:
+				elapsed := time.Since(startTime).Seconds()
+				if elapsed <= 0 {
+					continue
+				}
+				// Create metrics snapshot
+				snapshot := MetricSnapshot{
+					timestamp:     time.Now(),
+					messagesCount: totalMsg,
+					bytesReceived: totalBytes,
+					partition:     lastPartition,
+					offset:        lastOffset,
+				}
+
+				// Calculate metrics safely
+				if totalMsg > 0 {
+					snapshot.avgLatencyMs = float64(totalLatency.Milliseconds()) / float64(totalMsg)
+					snapshot.minLatencyMs = minLatency.Milliseconds()
+					snapshot.maxLatencyMs = maxLatency.Milliseconds()
+				}
+
+				// Calculate throughput
+				snapshot.msgThroughput = float64(totalMsg) / elapsed
+				snapshot.mbThroughput = float64(totalBytes) / 1024 / 1024 / elapsed
+
+				// Send metrics to channel if consumer is still running
+				if time.Now().Before(endTime) {
+					metricsChan <- snapshot
+				}
+			}
+		}
+	}()
+
+ConsumerLoop:
 	for {
 		select {
 		case sig := <-sigchan:
 			fmt.Printf("Terminating: %v\n", sig)
-			break BatchLoop
+			break ConsumerLoop
 		default:
-			msg, err := consumer.ReadMessage(100 * time.Millisecond)
+			if time.Now().After(endTime) {
+				fmt.Println("Run duration reached. Stopping consumer.")
+				break ConsumerLoop
+			}
+
+			msg, err := consumer.ReadMessage(time.Second)
 			if err != nil {
 				if err.(kafka.Error).Code() == kafka.ErrTimedOut {
 					continue
@@ -83,44 +168,124 @@ BatchLoop:
 				continue
 			}
 
-			// Start the timer when the first message is received
-			if totalMsg == 0 {
-				startTime = time.Now()
-			}
-
 			latency := time.Since(msg.Timestamp)
 			resultChan <- Result{latency: latency, size: len(msg.Value)}
 
 			totalMsg++
 			totalLatency += latency
-			totalBytes += int64(len(msg.Value)) // Accumulate total bytes
+			totalBytes += int64(len(msg.Value))
+			lastPartition = int(msg.TopicPartition.Partition)
+			lastOffset = int64(msg.TopicPartition.Offset)
+
 			if latency < minLatency {
 				minLatency = latency
 			}
 			if latency > maxLatency {
 				maxLatency = latency
 			}
-
-			if totalMsg >= batchSize {
-				break BatchLoop
-			}
 		}
 	}
 
+	// Final metrics collection after loop ends
+	if totalMsg > 0 {
+		elapsed := time.Since(startTime).Seconds()
+		metricsChan <- MetricSnapshot{
+			timestamp:     time.Now(),
+			messagesCount: totalMsg,
+			bytesReceived: totalBytes,
+			avgLatencyMs:  float64(totalLatency.Milliseconds()) / float64(totalMsg),
+			minLatencyMs:  minLatency.Milliseconds(),
+			maxLatencyMs:  maxLatency.Milliseconds(),
+			msgThroughput: float64(totalMsg) / elapsed,
+			mbThroughput:  float64(totalBytes) / 1024 / 1024 / elapsed,
+			partition:     lastPartition,
+			offset:        lastOffset,
+		}
+	}
+
+	// Close channels and wait for goroutines to finish
 	close(resultChan)
+	close(metricsChan)
 	wg.Wait()
+
 	elapsed := time.Since(startTime)
+
+	// Print summary to console
 	fmt.Printf("\n=== Consumer Metrics ===\n")
+	fmt.Printf("Run Duration: %s\n", runDuration)
 	fmt.Printf("Messages received: %d\n", totalMsg)
 	fmt.Printf("Time elapsed: %.2f seconds\n", elapsed.Seconds())
-	fmt.Printf("Throughput: %.2f messages/second\n", float64(totalMsg)/elapsed.Seconds())
-	fmt.Printf("Throughput: %.2f MB/second\n", float64(totalBytes)/1024/1024/elapsed.Seconds())
 
-	// Calculate average latency
-	avgLatency := time.Duration(int64(totalLatency) / int64(totalMsg))
+	if totalMsg > 0 && elapsed.Seconds() > 0 {
+		fmt.Printf("Throughput: %.2f messages/second\n", float64(totalMsg)/elapsed.Seconds())
+		fmt.Printf("Throughput: %.2f MB/second\n", float64(totalBytes)/1024/1024/elapsed.Seconds())
+		avgLatency := time.Duration(int64(totalLatency) / int64(totalMsg))
+		fmt.Printf("Latency (min/mean/max): %v / %v / %v\n",
+			minLatency.Round(time.Microsecond),
+			avgLatency.Round(time.Microsecond),
+			maxLatency.Round(time.Microsecond))
+		fmt.Printf("Last partition/offset: %d/%d\n", lastPartition, lastOffset)
+	} else {
+		fmt.Println("No messages were received during the test run.")
+	}
 
-	fmt.Printf("Latency (min/mean/max): %v / %v / %v\n",
-		minLatency.Round(time.Microsecond),
-		avgLatency.Round(time.Microsecond),
-		maxLatency.Round(time.Microsecond))
+	fmt.Println("Metrics have been saved to CSV file.")
+	os.Exit(0)
+}
+
+// collectAndSaveMetrics saves metrics snapshots to a CSV file
+func collectAndSaveMetrics(metricsChan chan MetricSnapshot) {
+	filename := fmt.Sprintf("redpanda_consumer_metrics_%s.csv", time.Now().Format("2006-01-02_15-04-05"))
+	file, err := os.Create(filename)
+	if err != nil {
+		log.Printf("Failed to create metrics file: %v", err)
+		return
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write header
+	headers := []string{
+		"timestamp",
+		"messages_count",
+		"bytes_received",
+		"msg_throughput",
+		"mb_throughput",
+		"avg_latency_ms",
+		"min_latency_ms",
+		"max_latency_ms",
+		"partition",
+		"offset",
+	}
+
+	if err := writer.Write(headers); err != nil {
+		log.Printf("Error writing CSV headers: %v", err)
+		return
+	}
+
+	// Write metrics data from channel as they arrive
+	for m := range metricsChan {
+		row := []string{
+			m.timestamp.Format(time.RFC3339),
+			strconv.Itoa(m.messagesCount),
+			strconv.FormatInt(m.bytesReceived, 10),
+			fmt.Sprintf("%.2f", m.msgThroughput),
+			fmt.Sprintf("%.2f", m.mbThroughput),
+			fmt.Sprintf("%.2f", m.avgLatencyMs),
+			fmt.Sprintf("%d", m.minLatencyMs),
+			fmt.Sprintf("%d", m.maxLatencyMs),
+			strconv.Itoa(m.partition),
+			strconv.FormatInt(m.offset, 10),
+		}
+
+		if err := writer.Write(row); err != nil {
+			log.Printf("Error writing CSV row: %v", err)
+			continue
+		}
+		writer.Flush()
+	}
+
+	log.Printf("Metrics exported to %s", filename)
 }
