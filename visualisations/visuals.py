@@ -4,7 +4,7 @@ from plotly.subplots import make_subplots
 
 # Load CSV and clean column names
 df = pd.read_csv(
-    "/Users/noumanqureshi/Desktop/Thesis/redpanda_experiment/consumer/redpanda_consumer_metrics_2025-04-12_15-23-58.csv",
+    "path/to/your/csvfile.csv",  # Replace with your CSV file path
     sep=None,  # Auto-detect separator
     engine="python"
 )
