@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/csv"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -42,6 +43,24 @@ var (
 	prevWallTime time.Time
 )
 
+// waitForTopic waits for topic to become available
+func waitForTopic(consumer *kafka.Consumer, topic string, maxAttempts int) bool {
+	log.Printf("Waiting for topic %s to become available...", topic)
+	for i := 0; i < maxAttempts; i++ {
+		metadata, err := consumer.GetMetadata(&topic, false, 5000)
+		if err == nil {
+			if topicMetadata, ok := metadata.Topics[topic]; ok && len(topicMetadata.Partitions) > 0 {
+				log.Printf("Topic %s is available with %d partitions", topic, len(topicMetadata.Partitions))
+				return true
+			}
+		}
+		log.Printf("Waiting for topic %s (attempt %d/%d): %v", topic, i+1, maxAttempts, err)
+		time.Sleep(2 * time.Second)
+	}
+	log.Printf("Topic %s not available after %d attempts", topic, maxAttempts)
+	return false
+}
+
 // getCPUTime returns total user+system CPU time of the calling process.
 func getCPUTime() time.Duration {
 	var rusage syscall.Rusage
@@ -53,14 +72,12 @@ func getCPUTime() time.Duration {
 	return user + sys
 }
 
-// getCPUUsagePercent calculates CPU usage since the last call.
+// getCPUUsagePercent calculates CPU usage since the last call (single-core-based).
 func getCPUUsagePercent() float64 {
-	// Current CPU & wall-clock times
 	currCPUTime := getCPUTime()
 	currWallTime := time.Now()
 
 	if prevWallTime.IsZero() {
-		// First call, just initialise
 		prevCPUTime = currCPUTime
 		prevWallTime = currWallTime
 		return 0.0
@@ -69,41 +86,48 @@ func getCPUUsagePercent() float64 {
 	cpuDelta := currCPUTime - prevCPUTime
 	wallDelta := currWallTime.Sub(prevWallTime)
 
-	// Update previous for next calculation
 	prevCPUTime = currCPUTime
 	prevWallTime = currWallTime
 
 	if wallDelta <= 0 {
 		return 0.0
 	}
-	return float64(cpuDelta) / float64(wallDelta) * 100.0
+	return (float64(cpuDelta) / float64(wallDelta) * 100.0) / float64(runtime.NumCPU())
 }
 
 // getMemoryUsageMB returns the current allocated memory in MB.
 func getMemoryUsageMB() float64 {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
-	// Optionally free OS memory to update stats more often:
-	// debug.FreeOSMemory()
 	return float64(m.Alloc) / (1024.0 * 1024.0)
 }
 
 func main() {
 	var runDuration time.Duration
 
-	fmt.Print("Enter run duration (e.g., 5m for 5 minutes): ")
-	var durationInput string
-	fmt.Scan(&durationInput)
-
-	// Parse the duration input (e.g., "5m" for 5 minutes)
-	runDurationParsed, err := time.ParseDuration(durationInput)
-	if err != nil {
-		log.Fatalf("Invalid duration format: %v", err)
+	// Accept run duration as a command-line argument or flag
+	flag.DurationVar(&runDuration, "duration", 0, "Run duration (e.g., 5m, 30s)")
+	flag.Parse()
+	if runDuration == 0 && flag.NArg() > 0 {
+		var err error
+		runDuration, err = time.ParseDuration(flag.Arg(0))
+		if err != nil {
+			log.Fatalf("Invalid duration format: %v", err)
+		}
 	}
-	runDuration = runDurationParsed
+	if runDuration == 0 {
+		log.Fatalf("Please provide run duration as a flag or argument (e.g., go run consumer.go -duration=5m or go run consumer.go 5m)")
+	}
+
+	// Get Kafka broker from environment variable
+	kafkaBroker := os.Getenv("KAFKA_BROKER")
+	if kafkaBroker == "" {
+		kafkaBroker = "localhost:29092" // Default for local development
+	}
+	log.Printf("Using Kafka broker: %s", kafkaBroker)
 
 	consumer, err := kafka.NewConsumer(&kafka.ConfigMap{
-		"bootstrap.servers":      "localhost:29092",
+		"bootstrap.servers":      kafkaBroker,
 		"group.id":               "perf-test-group",
 		"auto.offset.reset":      "latest",
 		"fetch.min.bytes":        1,
@@ -117,11 +141,17 @@ func main() {
 	}
 	defer consumer.Close()
 
-	consumer.SubscribeTopics([]string{"test_topic"}, nil)
+	// Wait for topic to be available before subscribing
+	topic := "test_topic"
+	if !waitForTopic(consumer, topic, 30) { // Wait up to 1 minute
+		log.Fatalf("Topic %s not available after waiting, exiting", topic)
+	}
+
+	consumer.SubscribeTopics([]string{topic}, nil)
 
 	resultChan := make(chan Result, 10000)
 	metricsChan := make(chan MetricSnapshot, 1000)
-	workers := runtime.NumCPU() * 2 // Dynamically set based on CPU cores
+	workers := runtime.NumCPU() * 2
 	var wg sync.WaitGroup
 
 	// Start workers
@@ -130,7 +160,6 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for res := range resultChan {
-				// Simulate processing
 				_ = res
 			}
 		}()
@@ -158,13 +187,11 @@ func main() {
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
 
-	// Create metrics ticker
 	metricsTicker := time.NewTicker(1 * time.Second)
 	defer metricsTicker.Stop()
 
 	fmt.Printf("Consumer started (workers=%d)\n", workers)
 
-	// Initialize CPU measurement references
 	prevCPUTime = getCPUTime()
 	prevWallTime = time.Now()
 
@@ -178,7 +205,6 @@ func main() {
 			if elapsed <= 0 {
 				continue
 			}
-			// Create metrics snapshot
 			snapshot := MetricSnapshot{
 				timestamp:       time.Now(),
 				messagesCount:   totalMsg,
@@ -188,19 +214,14 @@ func main() {
 				cpuUsagePercent: getCPUUsagePercent(),
 				memUsageMB:      getMemoryUsageMB(),
 			}
-
-			// Calculate latency stats if we have messages
 			if totalMsg > 0 {
 				snapshot.avgLatencyMs = float64(totalLatency.Milliseconds()) / float64(totalMsg)
 				snapshot.minLatencyMs = minLatency.Milliseconds()
 				snapshot.maxLatencyMs = maxLatency.Milliseconds()
 			}
-
-			// Calculate throughput
 			snapshot.msgThroughput = float64(totalMsg) / elapsed
 			snapshot.mbThroughput = float64(totalBytes) / 1024 / 1024 / elapsed
 
-			// Send metrics to channel if consumer is still running
 			if time.Now().Before(endTime) {
 				metricsChan <- snapshot
 			}
@@ -218,19 +239,14 @@ ConsumerLoop:
 				fmt.Println("Run duration reached. Stopping consumer.")
 				break ConsumerLoop
 			}
-
-			// Read a message with a 1-second timeout
 			msg, err := consumer.ReadMessage(time.Second)
 			if err != nil {
-				// Kafka timeout
 				if err.(kafka.Error).Code() == kafka.ErrTimedOut {
 					continue
 				}
 				log.Printf("Error: %v", err)
 				continue
 			}
-
-			// Calculate latency from message timestamp
 			latency := time.Since(msg.Timestamp)
 			resultChan <- Result{latency: latency, size: len(msg.Value)}
 
@@ -261,7 +277,6 @@ ConsumerLoop:
 			cpuUsagePercent: getCPUUsagePercent(),
 			memUsageMB:      getMemoryUsageMB(),
 		}
-
 		finalSnapshot.avgLatencyMs = float64(totalLatency.Milliseconds()) / float64(totalMsg)
 		finalSnapshot.minLatencyMs = minLatency.Milliseconds()
 		finalSnapshot.maxLatencyMs = maxLatency.Milliseconds()
@@ -271,13 +286,11 @@ ConsumerLoop:
 		metricsChan <- finalSnapshot
 	}
 
-	// Close channels and wait for goroutines to finish
 	close(resultChan)
 	close(metricsChan)
 	wg.Wait()
 
 	elapsed := time.Since(startTime)
-	// Print summary to console
 	fmt.Printf("\n=== Consumer Metrics ===\n")
 	fmt.Printf("Run Duration: %s\n", runDuration)
 	fmt.Printf("Messages received: %d\n", totalMsg)
@@ -303,7 +316,8 @@ ConsumerLoop:
 // collectAndSaveMetrics saves metrics snapshots to a CSV file,
 // now including CPU and memory usage.
 func collectAndSaveMetrics(metricsChan chan MetricSnapshot) {
-	filename := fmt.Sprintf("kafka_consumer_metrics_%s.csv", time.Now().Format("2006-01-02_15-04-05"))
+	// Save to mounted volume directory for persistence
+	filename := fmt.Sprintf("/app/metrics/kafka_consumer_metrics_%s.csv", time.Now().Format("2006-01-02_15-04-05"))
 	file, err := os.Create(filename)
 	if err != nil {
 		log.Printf("Failed to create metrics file: %v", err)
@@ -314,7 +328,6 @@ func collectAndSaveMetrics(metricsChan chan MetricSnapshot) {
 	writer := csv.NewWriter(file)
 	defer writer.Flush()
 
-	// Write header, including new fields
 	headers := []string{
 		"timestamp",
 		"messages_count",
@@ -334,7 +347,6 @@ func collectAndSaveMetrics(metricsChan chan MetricSnapshot) {
 		return
 	}
 
-	// Write metrics data from channel as they arrive
 	for m := range metricsChan {
 		row := []string{
 			m.timestamp.Format(time.RFC3339),
@@ -350,13 +362,15 @@ func collectAndSaveMetrics(metricsChan chan MetricSnapshot) {
 			fmt.Sprintf("%.2f", m.cpuUsagePercent),
 			fmt.Sprintf("%.2f", m.memUsageMB),
 		}
-
 		if err := writer.Write(row); err != nil {
 			log.Printf("Error writing CSV row: %v", err)
 			continue
 		}
 		writer.Flush()
 	}
-
+	// At the end of main() after writing metrics
+	log.Println("Sleeping for 3 seconds to ensure file is written...")
+	time.Sleep(3 * time.Second)
+	log.Println("Consumer exiting")
 	log.Printf("Metrics exported to %s", filename)
 }
