@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -21,23 +23,52 @@ func main() {
 	var messageRate int
 	var runDuration time.Duration
 
-	fmt.Print("Enter message size (bytes): ")
-	fmt.Scan(&messageSize)
-	fmt.Print("Enter message rate (messages/sec): ")
-	fmt.Scan(&messageRate)
-	fmt.Print("Enter run duration (e.g., 5m for 5 minutes): ")
-	var durationInput string
-	fmt.Scan(&durationInput)
+	// Parse command-line flags
+	flag.Int64Var(&messageSize, "size", 0, "Message size in bytes")
+	flag.IntVar(&messageRate, "rate", 0, "Message rate in messages/sec")
+	flag.DurationVar(&runDuration, "duration", 0, "Run duration (e.g., 5m)")
+	flag.Parse()
 
-	// Parse the duration input (e.g., "5m" for 5 minutes)
-	runDuration, err := time.ParseDuration(durationInput)
-	if err != nil {
-		log.Fatalf("Invalid duration format: %v", err)
+	// If args not provided via flags, try positional arguments
+	args := flag.Args()
+	if messageSize == 0 && len(args) > 0 {
+		size, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid message size: %v", err)
+		}
+		messageSize = size
 	}
 
-	kafkaBroker := "localhost:29092"
+	if messageRate == 0 && len(args) > 1 {
+		rate, err := strconv.Atoi(args[1])
+		if err != nil {
+			log.Fatalf("Invalid message rate: %v", err)
+		}
+		messageRate = rate
+	}
+
+	if runDuration == 0 && len(args) > 2 {
+		duration, err := time.ParseDuration(args[2])
+		if err != nil {
+			log.Fatalf("Invalid duration format: %v", err)
+		}
+		runDuration = duration
+	}
+
+	// Verify we have all required arguments
+	if messageSize <= 0 || messageRate <= 0 || runDuration <= 0 {
+		log.Fatalf("Please provide valid values for size, rate, and duration.\n" +
+			"Example: ./producer -size=1024 -rate=10000 -duration=5m\n" +
+			"     or: ./producer 1024 10000 5m")
+	}
+
+	fmt.Printf("Starting producer with size=%d bytes, rate=%d msg/s, duration=%s\n",
+		messageSize, messageRate, runDuration)
+
+	kafkaBroker := "kafka:9092"
 	topic := "test_topic"
 
+	// Rest of your existing producer code remains unchanged
 	producer, err := kafka.NewProducer(&kafka.ConfigMap{
 		"bootstrap.servers": kafkaBroker,
 		"linger.ms":         0,     // Small batching- no artificial delays
