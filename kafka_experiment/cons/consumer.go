@@ -17,7 +17,7 @@ import (
 
 type Result struct {
 	latency time.Duration
-	size    int // Size of the message in bytes
+	size    int // Size of the message in bytes accumulated
 }
 
 type MetricSnapshot struct {
