@@ -24,6 +24,7 @@ services:
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+  
   init-kafka:
     image: confluentinc/cp-kafka:5.3.1
     depends_on:
@@ -35,7 +36,7 @@ services:
       echo 'Waiting for Kafka to be ready...'
       while ! kafka-topics --bootstrap-server kafka:9092 --list; do
         echo 'Kafka not ready yet. Retrying in 5 seconds...'
-        sleep 40
+        sleep 5
       done
 
       # Create Kafka topics
@@ -50,4 +51,51 @@ services:
       # List all topics to confirm creation
       echo 'Successfully created the following topics:'
       kafka-topics --bootstrap-server kafka:9092 --list
+      "
+
+  producer:
+    build:
+      context: ./prod
+      dockerfile: Dockerfile
+    depends_on:
+      - init-kafka
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      GOTOOLCHAIN: "auto"
+    command: ["go", "run", "producer.go", "1024", "10000", "1m"]
+  
+  consumer:
+    build:
+      context: ./cons
+      dockerfile: Dockerfile
+    container_name: kafka_experiment-consumer-1
+    depends_on:
+      - producer
+    environment:
+      KAFKA_BROKER: "kafka:9092"
+      GOTOOLCHAIN: "auto"
+    command: ["go", "run", "consumer.go", "1m"]
+  
+  export-metrics:
+    image: docker:cli
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./metrics:/metrics
+    depends_on:
+      - consumer
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      echo 'Waiting for consumer to complete...'
+      while [ \"$(docker inspect -f {{.State.Running}} kafka_experiment-consumer-1 2>/dev/null)\" != \"false\" ]; do
+        echo 'Consumer still running, waiting...'
+        sleep 5
+      done
+      
+      echo 'Consumer has finished. Copying metrics files...'
+      mkdir -p /metrics
+      docker cp kafka_experiment-consumer-1:/app/. /metrics/
+      echo 'Metrics files copied successfully to host directory'
+      echo 'Files available in ./metrics directory:'
+      ls -la /metrics/*.csv 2>/dev/null || echo 'No CSV files found'
       "

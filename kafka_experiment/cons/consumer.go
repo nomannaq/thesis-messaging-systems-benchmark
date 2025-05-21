@@ -122,7 +122,7 @@ func main() {
 	// Get Kafka broker from environment variable
 	kafkaBroker := os.Getenv("KAFKA_BROKER")
 	if kafkaBroker == "" {
-		kafkaBroker = "localhost:29092" // Default for local development
+		kafkaBroker = "localhost:9092" // Default for local development
 	}
 	log.Printf("Using Kafka broker: %s", kafkaBroker)
 
