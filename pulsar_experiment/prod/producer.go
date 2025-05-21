@@ -7,30 +7,24 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	pulsar "github.com/apache/pulsar-client-go/pulsar"
-	"golang.org/x/time/rate"
 )
 
 func main() {
-	var messageSize int64
-	var messageRate int
-	var runDuration time.Duration
-
-	fmt.Print("Enter message size (bytes): ")
-	fmt.Scan(&messageSize)
-	fmt.Print("Enter message rate (messages/sec): ")
-	fmt.Scan(&messageRate)
-	fmt.Print("Enter run duration (e.g., 5m for 5 minutes): ")
-	var durationInput string
-	fmt.Scan(&durationInput)
-
-	// Parse the duration input (e.g., "5m" for 5 minutes)
-	runDuration, err := time.ParseDuration(durationInput)
+	if len(os.Args) < 3 {
+		log.Fatalf("Usage: go run producer.go <messageSize> <duration> (e.g., 1024 1m)")
+	}
+	messageSize, err := strconv.ParseInt(os.Args[1], 10, 64)
+	if err != nil {
+		log.Fatalf("Invalid message size: %v", err)
+	}
+	runDuration, err := time.ParseDuration(os.Args[2])
 	if err != nil {
 		log.Fatalf("Invalid duration format: %v", err)
 	}
@@ -60,11 +54,10 @@ func main() {
 		wg           sync.WaitGroup
 		successCount atomic.Int64
 		failureCount atomic.Int64
-		limiter      = rate.NewLimiter(rate.Limit(messageRate), messageRate)
 		workers      = runtime.NumCPU() * 2
 		shutdown     = make(chan struct{})
 		start        = time.Now()
-		endTime      = start.Add(runDuration) // Calculate end time
+		endTime      = start.Add(runDuration)
 	)
 
 	// Signal handling for graceful shutdown
@@ -89,11 +82,6 @@ func main() {
 					if time.Now().After(endTime) {
 						fmt.Println("Run duration reached. Stopping worker.")
 						return
-					}
-
-					if err := limiter.WaitN(context.Background(), 1); err != nil {
-						log.Printf("Rate limiter error: %v", err)
-						continue
 					}
 
 					_, err := producer.Send(context.Background(), &pulsar.ProducerMessage{
