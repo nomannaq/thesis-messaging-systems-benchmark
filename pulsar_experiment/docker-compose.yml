@@ -1,135 +1,78 @@
-version: '3'
+version: "3"
 services:
-  # ZooKeeper for metadata coordination
   zookeeper:
     image: apachepulsar/pulsar:latest
     container_name: zookeeper
-    restart: on-failure
     ports:
-      - "2181:2181"
-    environment:
-      - PULSAR_MEM=-Xms256m -Xmx256m
-    command: >
-      bash -c "bin/apply-config-from-env.py conf/zookeeper.conf &&
-               bin/generate-zookeeper-config.sh conf/zookeeper.conf &&
-               exec bin/pulsar zookeeper"
-    healthcheck:
-      test: ["CMD", "bin/pulsar-zookeeper-ruok.sh"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
+      - "2181:2181" # Expose ZooKeeper client port for external access (e.g., ZooKeeper CLI)
+    command: ["bash", "-c", "PID_DIR=/pulsar/logs bin/pulsar-daemon start zookeeper && tail -F /pulsar/logs/*.log"]
+    # Optional: Add volumes for persistent ZooKeeper data. Uncomment and create these directories on your host.
+    # volumes:
+    #   - ./data/zookeeper/data:/pulsar/data/zookeeper
+    #   - ./data/zookeeper/datalog:/pulsar/data/zookeeper/datalog
 
-  # BookKeeper nodes for data storage (3 instances)
   bookie1:
     image: apachepulsar/pulsar:latest
     container_name: bookie1
-    restart: on-failure
+    ports:
+      - "3181:3181" # Expose Bookie 1 port (host:container)
     depends_on:
-      zookeeper:
-        condition: service_healthy
+      - zookeeper # Ensure Zookeeper starts before Bookies
+    command: ["bash", "-c", "PID_DIR=/pulsar/logs bin/pulsar-daemon start bookie -conf bookkeeper.conf && tail -F /pulsar/logs/*.log"]
     environment:
-      - PULSAR_MEM=-Xms512m -Xmx512m
-      - ZK_SERVERS=zookeeper:2181
-    command: >
-      bash -c "bin/apply-config-from-env.py conf/bookkeeper.conf &&
-               bin/generate-zookeeper-config.sh conf/bookkeeper.conf &&
-               exec bin/pulsar bookie"
-  
+      PULSAR_PREFIX_zookeeperServers: zookeeper:2181 # Point to Zookeeper service within Docker network
+      PULSAR_PREFIX_bookiePort: 3181 # Internal port for bookie
+    # Optional: Add volumes for persistent Bookie data. Uncomment and create these directories on your host.
+    # volumes:
+    #   - ./data/bookie1/data:/pulsar/data/bookie
+    #   - ./data/bookie1/journal:/pulsar/data/journal
+
   bookie2:
     image: apachepulsar/pulsar:latest
     container_name: bookie2
-    restart: on-failure
+    ports:
+      - "3182:3181" # Expose Bookie 2 port (host:container). Use different host ports.
     depends_on:
-      zookeeper:
-        condition: service_healthy
+      - zookeeper
+    command: ["bash", "-c", "PID_DIR=/pulsar/logs bin/pulsar-daemon start bookie -conf bookkeeper.conf && tail -F /pulsar/logs/*.log"]
     environment:
-      - PULSAR_MEM=-Xms512m -Xmx512m
-      - ZK_SERVERS=zookeeper:2181
-    command: >
-      bash -c "bin/apply-config-from-env.py conf/bookkeeper.conf &&
-               bin/generate-zookeeper-config.sh conf/bookkeeper.conf &&
-               exec bin/pulsar bookie"
-  
+      PULSAR_PREFIX_zookeeperServers: zookeeper:2181
+      PULSAR_PREFIX_bookiePort: 3181
+
   bookie3:
     image: apachepulsar/pulsar:latest
     container_name: bookie3
-    restart: on-failure
-    depends_on:
-      zookeeper:
-        condition: service_healthy
-    environment:
-      - PULSAR_MEM=-Xms512m -Xmx512m
-      - ZK_SERVERS=zookeeper:2181
-    command: >
-      bash -c "bin/apply-config-from-env.py conf/bookkeeper.conf &&
-               bin/generate-zookeeper-config.sh conf/bookkeeper.conf &&
-               exec bin/pulsar bookie"
-
-  # Initialize cluster metadata
-  init:
-    image: apachepulsar/pulsar:latest
-    container_name: init
-    depends_on:
-      zookeeper:
-        condition: service_healthy
-    command: >
-      bin/pulsar initialize-cluster-metadata \
-        --cluster pulsar-cluster \
-        --zookeeper zookeeper:2181 \
-        --configuration-store zookeeper:2181 \
-        --web-service-url http://broker1:8080,http://broker2:8080 \
-        --broker-service-url pulsar://broker1:6650,pulsar://broker2:6650
-    restart: on-failure
-
-  # Pulsar brokers (2 instances)
-  broker1:
-    image: apachepulsar/pulsar:latest
-    container_name: broker1
-    restart: on-failure
-    depends_on:
-      zookeeper:
-        condition: service_healthy
-      init:
-        condition: service_completed_successfully
     ports:
-      - "6650:6650"   # Broker service port
-      - "8080:8080"   # Web service port
+      - "3183:3181" # Expose Bookie 3 port (host:container). Use different host ports.
+    depends_on:
+      - zookeeper
+    command: ["bash", "-c", "PID_DIR=/pulsar/logs bin/pulsar-daemon start bookie -conf bookkeeper.conf && tail -F /pulsar/logs/*.log"]
     environment:
-      - PULSAR_MEM=-Xms512m -Xmx512m
-      - ZK_SERVERS=zookeeper:2181
-      - metadataStoreUrl=zk:zookeeper:2181
-      - clusterName=pulsar-cluster
-      - advertisedAddress=broker1
-    command: bin/pulsar broker
+      PULSAR_PREFIX_zookeeperServers: zookeeper:2181
+      PULSAR_PREFIX_bookiePort: 3181
 
-  broker2:
+  pulsar:
     image: apachepulsar/pulsar:latest
-    container_name: broker2
-    restart: on-failure
-    depends_on:
-      zookeeper:
-        condition: service_healthy
-      init:
-        condition: service_completed_successfully
+    container_name: pulsar1
     ports:
-      - "6651:6650"   # Broker service port
-      - "8081:8080"   # Web service port
-    environment:
-      - PULSAR_MEM=-Xms512m -Xmx512m
-      - ZK_SERVERS=zookeeper:2181
-      - metadataStoreUrl=zk:zookeeper:2181
-      - clusterName=pulsar-cluster
-      - advertisedAddress=broker2
-    command: bin/pulsar broker
-
-  # Pulsar admin dashboard
-  dashboard:
-    image: apachepulsar/pulsar-dashboard:latest
-    container_name: dashboard
+      - "6650:6650"   # Pulsar broker port for messaging (for your Go producer)
+      - "8080:8080"   # Pulsar REST API and web interface (for admin tools/UI)
     depends_on:
-      - broker1
-      - broker2
-    ports:
-      - "80:80"
+      - zookeeper
+      - bookie1
+      - bookie2
+      - bookie3
+    command: ["bash", "-c", "PID_DIR=/pulsar/logs bin/pulsar-daemon start broker && tail -F /pulsar/logs/*.log"]
     environment:
-      - SERVICE_URL=http://broker1:8080,http://broker2:8080
+      PULSAR_PREFIX_zookeeperServers: zookeeper:2181
+      PULSAR_PREFIX_configurationStoreServers: zookeeper:2181
+      # *** CRITICAL FOR EXTERNAL CONNECTIONS ***
+      # Tells the broker what IP address to advertise to clients.
+      # Using 127.0.0.1 explicitly forces IPv4 loopback.
+      # If your producer is on a different machine, replace '127.0.0.1' with your Docker host's actual IP address.
+      PULSAR_PREFIX_advertisedAddress: 127.0.0.1
+      # Tells the broker which network interfaces to listen on inside the container.
+      # 0.0.0.0 means listen on all available interfaces (IPv4 and IPv6).
+      PULSAR_PREFIX_listeners: "pulsar://0.0.0.0:6650"
+      # Ensures the advertised port matches the exposed port
+      PULSAR_PREFIX_brokerServicePort: 6650
