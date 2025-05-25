@@ -130,7 +130,6 @@ func main() {
 	fmt.Printf("Throughput: %.2f msg/s\n", float64(successCount.Load())/elapsed.Seconds())
 	fmt.Printf("Throughput: %.2f MB/s\n",
 		(float64(successCount.Load()*messageSize) / 1024 / 1024 / elapsed.Seconds()))
-
 	fmt.Println("Producer closed gracefully.")
 	os.Exit(0)
 }
