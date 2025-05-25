@@ -1,9 +1,135 @@
-version: "3"
+version: '3'
 services:
-  pulsar:
+  # ZooKeeper for metadata coordination
+  zookeeper:
     image: apachepulsar/pulsar:latest
-    container_name: pulsar1
+    container_name: zookeeper
+    restart: on-failure
     ports:
-      - "6650:6650"   # Pulsar broker port for messaging
-      - "8080:8080"   # Pulsar REST API and web interface
-    command: ["/pulsar/bin/pulsar", "standalone"]
+      - "2181:2181"
+    environment:
+      - PULSAR_MEM=-Xms256m -Xmx256m
+    command: >
+      bash -c "bin/apply-config-from-env.py conf/zookeeper.conf &&
+               bin/generate-zookeeper-config.sh conf/zookeeper.conf &&
+               exec bin/pulsar zookeeper"
+    healthcheck:
+      test: ["CMD", "bin/pulsar-zookeeper-ruok.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # BookKeeper nodes for data storage (3 instances)
+  bookie1:
+    image: apachepulsar/pulsar:latest
+    container_name: bookie1
+    restart: on-failure
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      - PULSAR_MEM=-Xms512m -Xmx512m
+      - ZK_SERVERS=zookeeper:2181
+    command: >
+      bash -c "bin/apply-config-from-env.py conf/bookkeeper.conf &&
+               bin/generate-zookeeper-config.sh conf/bookkeeper.conf &&
+               exec bin/pulsar bookie"
+  
+  bookie2:
+    image: apachepulsar/pulsar:latest
+    container_name: bookie2
+    restart: on-failure
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      - PULSAR_MEM=-Xms512m -Xmx512m
+      - ZK_SERVERS=zookeeper:2181
+    command: >
+      bash -c "bin/apply-config-from-env.py conf/bookkeeper.conf &&
+               bin/generate-zookeeper-config.sh conf/bookkeeper.conf &&
+               exec bin/pulsar bookie"
+  
+  bookie3:
+    image: apachepulsar/pulsar:latest
+    container_name: bookie3
+    restart: on-failure
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    environment:
+      - PULSAR_MEM=-Xms512m -Xmx512m
+      - ZK_SERVERS=zookeeper:2181
+    command: >
+      bash -c "bin/apply-config-from-env.py conf/bookkeeper.conf &&
+               bin/generate-zookeeper-config.sh conf/bookkeeper.conf &&
+               exec bin/pulsar bookie"
+
+  # Initialize cluster metadata
+  init:
+    image: apachepulsar/pulsar:latest
+    container_name: init
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    command: >
+      bin/pulsar initialize-cluster-metadata \
+        --cluster pulsar-cluster \
+        --zookeeper zookeeper:2181 \
+        --configuration-store zookeeper:2181 \
+        --web-service-url http://broker1:8080,http://broker2:8080 \
+        --broker-service-url pulsar://broker1:6650,pulsar://broker2:6650
+    restart: on-failure
+
+  # Pulsar brokers (2 instances)
+  broker1:
+    image: apachepulsar/pulsar:latest
+    container_name: broker1
+    restart: on-failure
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    ports:
+      - "6650:6650"   # Broker service port
+      - "8080:8080"   # Web service port
+    environment:
+      - PULSAR_MEM=-Xms512m -Xmx512m
+      - ZK_SERVERS=zookeeper:2181
+      - metadataStoreUrl=zk:zookeeper:2181
+      - clusterName=pulsar-cluster
+      - advertisedAddress=broker1
+    command: bin/pulsar broker
+
+  broker2:
+    image: apachepulsar/pulsar:latest
+    container_name: broker2
+    restart: on-failure
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    ports:
+      - "6651:6650"   # Broker service port
+      - "8081:8080"   # Web service port
+    environment:
+      - PULSAR_MEM=-Xms512m -Xmx512m
+      - ZK_SERVERS=zookeeper:2181
+      - metadataStoreUrl=zk:zookeeper:2181
+      - clusterName=pulsar-cluster
+      - advertisedAddress=broker2
+    command: bin/pulsar broker
+
+  # Pulsar admin dashboard
+  dashboard:
+    image: apachepulsar/pulsar-dashboard:latest
+    container_name: dashboard
+    depends_on:
+      - broker1
+      - broker2
+    ports:
+      - "80:80"
+    environment:
+      - SERVICE_URL=http://broker1:8080,http://broker2:8080
