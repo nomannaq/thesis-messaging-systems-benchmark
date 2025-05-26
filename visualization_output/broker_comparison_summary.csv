@@ -1,0 +1,2 @@
+Broker,Message Size,Avg Throughput (msgs/sec),Avg Latency (ms),Avg Memory (MB)
+Kafka,1KB,48249.12535900104,62.529791883454735,2.115608740894901

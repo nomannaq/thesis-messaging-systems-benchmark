@@ -1,0 +1,2 @@
+Message Size,Avg Throughput (msgs/sec),Max Throughput (msgs/sec),Avg Bandwidth (MB/s),Avg Latency (ms),Max Latency (ms),Avg CPU (%),Avg Memory (MB),Total Messages,Test Duration (s)
+1KB,48249.12535900104,48949.81,47.1183558792924,62.529791883454735,1639,56.396742976066605,2.115608740894901,46723627,960.0
