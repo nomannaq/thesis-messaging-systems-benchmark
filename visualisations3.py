@@ -15,10 +15,10 @@ standard_duration = 840  # 14 minutes in seconds
 
 # Define file paths for different brokers (100KB only)
 file_paths = {
-    "Kafka": "/Users/noumanqureshi/Downloads/csc-things/3.csv",    # Update path to 100KB file
-    "RabbitMQ": "/Users/noumanqureshi/Downloads/csc-things/rabbitmq-102400.csv", # Update path to 100KB file
-    "Pulsar": "/Users/noumanqureshi/Downloads/csc-things/pulsar3bookies.csv",      # Update path to 100KB file
-    "Redpanda": "/Users/noumanqureshi/Downloads/csc-things/redpanda3.csv"   # Update path to 100KB file
+    "Kafka": "/Users/noumanqureshi/Downloads/csc-things/kafka1mb.csv",    # Update path to 100KB file
+    "RabbitMQ": "/Users/noumanqureshi/Downloads/csc-things/rabbitmq1mb.csv", # Update path to 100KB file
+    "Pulsar": "/Users/noumanqureshi/Downloads/csc-things/pulsar1mb.csv",      # Update path to 100KB file
+    "Redpanda": "/Users/noumanqureshi/Downloads/csc-things/redpanda1mb.csv"   # Update path to 100KB file
 }
 
 # Colors for each broker - keep the same color scheme for consistency

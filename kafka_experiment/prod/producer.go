@@ -32,11 +32,14 @@ func main() {
 	topic := "test_topic"
 
 	producer, err := kafka.NewProducer(&kafka.ConfigMap{
-		"bootstrap.servers": kafkaBroker,
-		"linger.ms":         0,
-		"batch.size":        64000,
-		"compression.type":  "lz4",
-		"acks":              "all",
+		"bootstrap.servers":  kafkaBroker,
+		"linger.ms":          0,
+		"batch.size":         2097152, // Increase to 2MB
+		"compression.type":   "lz4",
+		"acks":               "all",
+		"max.request.size":   2097152, // Allow 2MB requests
+		"message.max.bytes":  2097152, // Allow 2MB messages
+		"request.timeout.ms": 30000,
 	})
 	if err != nil {
 		log.Fatal(err)
